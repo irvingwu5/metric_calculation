@@ -1,0 +1,110 @@
+# This python script is for downloading dataset from www.tanksandtemples.org
+# https://github.com/yanivw12/gs2mesh/blob/b08a68f2b896301472d25fe3f5287b5b1bf1b737/evaluation/TNT/eval_code/python_toolbox/evaluation/run.py
+import argparse
+import open3d as o3d
+import os
+import numpy as np
+from evaluation import EvaluateHisto
+import matplotlib.pyplot as plt
+from cycler import cycler
+
+def load_mesh(ply_path, obj_path):
+    """加载重建的Mesh点云和真实Mesh文件"""
+    print(f"加载重建的点云: {ply_path}")
+    recon_ply = o3d.io.read_point_cloud(ply_path)
+    print(f"加载真实的Mesh: {obj_path}")
+    gt_mesh = o3d.io.read_triangle_mesh(obj_path)
+
+    # 转换真实mesh为点云，以便与重建的点云比较
+    gt_point_cloud = gt_mesh.sample_points_poisson_disk(number_of_points=len(recon_ply.points))
+
+    return recon_ply, gt_point_cloud
+
+
+def main(recon_ply_path, gt_path, output_dir, voxel_size=0.05, threshold=0.1, plot_stretch=3.0):
+    # 读取输入的点云和mesh
+    recon_ply, gt_point_cloud = load_mesh(recon_ply_path, gt_path)
+
+    # 构建一个虚拟的裁剪体积（crop volume），可以设置为整个空间的边界
+    crop_volume = o3d.geometry.AxisAlignedBoundingBox(min_bound=np.array([-np.inf, -np.inf, -np.inf]),
+                                                      max_bound=np.array([np.inf, np.inf, np.inf]))
+    # crop_volume = o3d.geometry.AxisAlignedBoundingBox(min_bound=np.array([-1, -1, -1]),
+    #                                                   max_bound=np.array([1, 1, 1]))
+    # 计算转化矩阵（如果有的话）
+    transformation_matrix = np.eye(4)  # 默认无变换
+    print("使用默认变换矩阵")
+
+    # 使用EvaluateHisto进行评估
+    precision, recall, fscore, edges_source, cum_source, edges_target, cum_target = EvaluateHisto(
+        recon_ply, gt_point_cloud, transformation_matrix, crop_volume, voxel_size, threshold, output_dir, plot_stretch,
+        "scene_name"
+    )
+
+    # 输出评估结果
+    print(f"精度 (Precision): {precision}")
+    print(f"召回率 (Recall): {recall}")
+    print(f"F1分数 (F-Score): {fscore}")
+
+    # 绘制并保存精度和召回率的曲线
+    plot_graph("scene_name", fscore, threshold, edges_source, cum_source, edges_target, cum_target, plot_stretch,
+               output_dir)
+
+
+def plot_graph(scene, fscore, dist_threshold, edges_source, cum_source, edges_target, cum_target, plot_stretch,
+               mvs_outpath):
+    f = plt.figure()
+    plt_size = [14, 7]
+    pfontsize = "medium"
+
+    ax = plt.subplot(111)
+    label_str = "precision"
+    ax.plot(
+        edges_source[1::],
+        cum_source * 100,
+        c="red",
+        label=label_str,
+        linewidth=2.0,
+    )
+
+    label_str = "recall"
+    ax.plot(
+        edges_target[1::],
+        cum_target * 100,
+        c="blue",
+        label=label_str,
+        linewidth=2.0,
+    )
+
+    ax.grid(True)
+    plt.rcParams["figure.figsize"] = plt_size
+    plt.rc("axes", prop_cycle=cycler("color", ["r", "g", "b", "y"]))
+    plt.title("Precision and Recall: " + scene + ", " + "%02.2f f-score" % (fscore * 100))
+    plt.axvline(x=dist_threshold, c="black", ls="dashed", linewidth=2.0)
+
+    plt.ylabel("# of points (%)", fontsize=15)
+    plt.xlabel("Meters", fontsize=15)
+    plt.axis([0, dist_threshold * plot_stretch, 0, 100])
+    ax.legend(shadow=True, fancybox=True, fontsize=pfontsize)
+    plt.setp(ax.get_legend().get_texts(), fontsize=pfontsize)
+
+    png_name = os.path.join(mvs_outpath, f"PR_{scene}_@d_th_0_{int(dist_threshold * 10000):04d}.png")
+    pdf_name = os.path.join(mvs_outpath, f"PR_{scene}_@d_th_0_{int(dist_threshold * 10000):04d}.pdf")
+
+    f.savefig(png_name, format="png", bbox_inches="tight")
+    f.savefig(pdf_name, format="pdf", bbox_inches="tight")
+    plt.show()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="计算Mesh重建评估指标")
+    parser.add_argument("--recon_ply_path", required=True, help="重建的Mesh点云路径 (PLY格式)")
+    parser.add_argument("--gt_path", required=True, help="真实Mesh文件路径 (OBJ格式)")
+    parser.add_argument("--output_dir", required=True, help="结果输出目录")
+    parser.add_argument("--voxel_size", type=float, default=0.05, help="点云体素化大小")
+    parser.add_argument("--threshold", type=float, default=0.1, help="计算精度和召回率的阈值")
+    parser.add_argument("--plot_stretch", type=float, default=3.0, help="精度/召回率曲线的扩展比例")
+
+    args = parser.parse_args()
+
+    # 调用主函数
+    main(args.recon_ply_path, args.gt_path, args.output_dir, args.voxel_size, args.threshold, args.plot_stretch)
