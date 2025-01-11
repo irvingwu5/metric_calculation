@@ -1,0 +1,107 @@
+import argparse
+import json
+from pathlib import Path
+
+import cv2
+import numpy as np
+import torch
+from skimage.metrics import structural_similarity as ssim
+import lpips
+from rich.console import Console
+
+CONSOLE = Console(width=120)
+
+# speedup for when input size to model doesn't change (much)
+torch.backends.cudnn.benchmark = True  # type: ignore
+torch.set_float32_matmul_precision("high")
+
+
+class ComputeMetrics:
+    """Load rendered and ground truth images, compute PSNR, SSIM, LPIPS metrics, and save them to a TXT file."""
+
+    def __init__(self, rendered_dir: Path, gt_dir: Path, output_path: Path):
+        self.rendered_dir = rendered_dir
+        self.gt_dir = gt_dir
+        self.output_path = output_path
+
+    def compute_psnr(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Compute PSNR (Peak Signal-to-Noise Ratio)."""
+        mse = np.mean((img1 - img2) ** 2)
+        if mse == 0:
+            return 100
+        max_pixel = 255.0
+        return 20 * np.log10(max_pixel / np.sqrt(mse))
+
+    def compute_ssim(self, img1: np.ndarray, img2: np.ndarray) -> float:
+        """Compute SSIM (Structural Similarity Index)."""
+        return ssim(img1, img2, multichannel=True)
+
+    def compute_lpips(self, img1: np.ndarray, img2: np.ndarray, lpips_model) -> float:
+        """Compute LPIPS (Learned Perceptual Image Patch Similarity)."""
+        img1_tensor = torch.tensor(img1).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+        img2_tensor = torch.tensor(img2).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+        img1_tensor = img1_tensor.cuda()
+        img2_tensor = img2_tensor.cuda()
+
+        # LPIPS expects a BxCxHxW input, so no need for reshaping
+        return lpips_model(img1_tensor, img2_tensor).item()
+
+    def main(self) -> None:
+        """Main function."""
+        assert self.output_path.suffix == ".txt"
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Initialize LPIPS model
+        lpips_model = lpips.LPIPS(net='alex').cuda()
+
+        # Storage for results
+        psnr_values = []
+        ssim_values = []
+        lpips_values = []
+
+        # Loop over the image pairs
+        for gt_image_path in self.gt_dir.glob("*.png"):
+            rendered_image_path = self.rendered_dir / gt_image_path.name
+            if not rendered_image_path.exists():
+                continue
+
+            # Read images
+            gt_image = cv2.imread(str(gt_image_path))
+            rendered_image = cv2.imread(str(rendered_image_path))
+
+            # Compute PSNR
+            psnr_val = self.compute_psnr(gt_image, rendered_image)
+            psnr_values.append(psnr_val)
+
+            # Compute SSIM
+            ssim_val = self.compute_ssim(gt_image, rendered_image)
+            ssim_values.append(ssim_val)
+
+            # Compute LPIPS
+            lpips_val = self.compute_lpips(gt_image, rendered_image, lpips_model)
+            lpips_values.append(lpips_val)
+
+        # Aggregate metrics
+        metrics_info = {
+            "psnr": np.mean(psnr_values),
+            "ssim": np.mean(ssim_values),
+            "lpips": np.mean(lpips_values),
+        }
+
+        # Save the metrics to TXT
+        with open(self.output_path, "w") as f:
+            for key, value in metrics_info.items():
+                f.write(f"{key}: {value}\n")
+        CONSOLE.print(f"Saved results to: {self.output_path}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Compute PSNR, SSIM, and LPIPS metrics for rendered images.")
+    parser.add_argument('--rendered_dir', type=Path, required=True, help="Path to rendered images directory.")
+    parser.add_argument('--gt_dir', type=Path, required=True, help="Path to ground truth images directory.")
+    parser.add_argument('--output_path', type=Path, default=Path("metrics.txt"), help="Name of the output file.")
+
+    args = parser.parse_args()
+
+    compute_metrics = ComputeMetrics(args.rendered_dir, args.gt_dir, args.output_path)
+    compute_metrics.main()
